@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.venv
+*.h5
+*.sbatch
+*.mplconfig
+*.err
+*.out
+*.npz
+*.png
+*.pdf
+
+data/miri*
+data/dja*
+pandeia_data-2026.2-jwst
+pandeia_psfs-2026.2-jwst
+production/*/*.csv
