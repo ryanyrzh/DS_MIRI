@@ -315,15 +315,17 @@ def fit_joint(
         inv_var = 1.0 / np.maximum(err, 1e-30) ** 2
 
     def loss(x):
+        # Soft wall on SMDS mass
         logM_ds = float(x[-1])
         pen = 0.0
         if logM_ds < LOGM_DS_MIN:
             pen += (LOGM_DS_MIN - logM_ds) ** 2 * 1e4
         if logM_ds > LOGM_DS_MAX:
             pen += (logM_ds - LOGM_DS_MAX) ** 2 * 1e4
+
         gal = _from_vec(x[:-1], base_galaxy, gal_keys, gal_log_keys)
         gal["z"] = float(z)
-        # Soft wall on galaxy logM (same pattern as SMDS mass)
+        # Soft wall on galaxy logM
         logM_gal = float(gal["logM"])
         if logM_gal < LOGM_GAL_MIN:
             pen += (LOGM_GAL_MIN - logM_gal) ** 2 * 1e4
