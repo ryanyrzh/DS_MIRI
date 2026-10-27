@@ -329,6 +329,14 @@ def fit_joint(
             pen += (LOGM_GAL_MIN - logM_gal) ** 2 * 1e4
         if logM_gal > LOGM_GAL_MAX:
             pen += (logM_gal - LOGM_GAL_MAX) ** 2 * 1e4
+        
+        # Constrain fesc to physical range
+        fesc = float(gal["fesc"])
+        if fesc < 0.0:
+            pen += (0.0 - fesc) ** 2 * 1e4
+        if fesc > 1.0:
+            pen += (fesc - 1.0) ** 2 * 1e4
+
         try:
             g = model_flux_at_obs_lambda(obs_lambda_um, gal, **spec_kwargs) * GALAXY_UNIT_SCALE
             s, _ = spectrum_from_mass_z(10.0 ** logM_ds, z, obs_lambda_um, template_set)
@@ -447,7 +455,7 @@ def fit_one_source(job):
         )
         base = dict(
             z=z, logM=7.8, age=0.03, tau=0.03,
-            Z=0.01, Av=0.15, logU=-2.5, fesc=0.7,
+            Z=0.01, Av=0.15, logU=-2.5, fesc=0.0,
         )
         nm_options = {"maxiter": int(job["maxiter"])}
         out = fit_joint(
