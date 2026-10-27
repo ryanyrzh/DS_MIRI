@@ -68,10 +68,24 @@ MIRI_FILTERS = {
     "f560w", "f770w", "f1000w", "f1130w", "f1280w",
     "f1500w", "f1800w", "f2100w", "f2550w",
 }
+# Approx. Pandeia instrument bandpasses [um] for SED overlap checks.
+MIRI_FILTER_BANDPASS = {
+    "f560w": (5.0, 6.5),
+    "f770w": (6.0, 9.0),
+    "f1000w": (8.5, 11.5),
+    "f1130w": (10.5, 12.5),
+    "f1280w": (11.5, 14.0),
+    "f1500w": (12.5, 18.0),
+    "f1800w": (15.5, 21.0),
+    "f2100w": (18.5, 24.5),
+    "f2550w": (22.0, 29.0),
+}
 
 # Catalog of downloaded MIRI Level-3 i2d stamps (status==ok rows used).
 MIRI_IMAG_CSV = DATA_DIR / "miri_dja_imag_ready.csv"
 MIRI_SPEC_CSV = DATA_DIR / "miri_dja_spectra_ready.csv"
+
+_SIM_ERR_LOGGED = False
 
 CATALOG = {
     "GS-z14-0":     dict(z=14.18, AV=0.13, re_pc=260, logM=8.84, logxi=-4.76, logZ=-0.75, field="JADES-GS"),
@@ -274,11 +288,18 @@ def load_jades_sed(name, sed_path=None):
 
 
 def mock_spectrum(z, Muv=-20.0, beta=-2.3, wave_max_um=28.0):
-    """UV power law plus Lyman break. Used when no real SED is available."""
+    """UV power law plus Lyman break. Used when no real SED is available.
+
+    Rest-frame grid extends red enough that observed-frame coverage reaches
+    wave_max_um (MIRI F2550W).
+    """
     from astropy.cosmology import Planck18
 
-    # Extend rest-frame red enough that observed MIRI bands still have continuum.
-    wave_rest = np.linspace(800, 5000, 800)
+    z = float(z)
+
+    wave_rest_max_A = max(5000.0, float(wave_max_um) / (1.0 + z) * 1e4)
+    n_wave = max(800, int(wave_rest_max_A / 5.0))
+    wave_rest = np.linspace(800.0, wave_rest_max_A, n_wave)
     f_rest = (wave_rest / 1500.0) ** beta
     f_rest[wave_rest < 912] *= 0.001
     f_rest *= 1.0 / (1.0 + np.exp(-(wave_rest - 1216.0) / 20.0))
@@ -293,6 +314,18 @@ def mock_spectrum(z, Muv=-20.0, beta=-2.3, wave_max_um=28.0):
     flux_mJy = fnu * 1e26
     mask = (wave_um > 0.6) & (wave_um < float(wave_max_um))
     return wave_um[mask], flux_mJy[mask]
+
+
+def sed_overlaps_filter(wave_um, filter_name):
+    """True if SED wavelengths overlap the approx instrument bandpass."""
+    band = MIRI_FILTER_BANDPASS.get(str(filter_name).lower())
+    if band is None or wave_um is None or len(wave_um) == 0:
+        return True  # unknown filter: do not block
+    w = np.asarray(wave_um, float)
+    w = w[np.isfinite(w)]
+    if len(w) == 0:
+        return False
+    return bool((np.nanmin(w) < band[1]) and (np.nanmax(w) > band[0]))
 
 
 def load_miri_spectrum_csv(path):
@@ -584,14 +617,30 @@ def extract_miri_radial_profile(fits_path, ra_deg, dec_deg, *,
     return r, prof, e, meta
 
 
-def load_miri_sed(row, sed_path=None, prefer_spectrum=True):
+def load_miri_sed(row, sed_path=None, prefer_spectrum=True, filter_name=None):
     """SED for one MIRI imaging source.
 
-    Priority: --sed file → matched MIRI x1d CSV (if prefer_spectrum) → mock_spectrum(z).
+    Priority: --sed file → matched MIRI x1d CSV (if prefer_spectrum and it
+    overlaps the imaging filter) → mock_spectrum(z) covering MIRI bands.
     """
+    filt = str(filter_name or row.get("filter", "")).lower()
+    z = float(row["z"])
+
+    def _mock():
+        wave, flux = mock_spectrum(z, wave_max_um=28.0)
+        return wave, flux, f"mock_spectrum:z={z:.3f}"
+
     if sed_path is not None:
         data = np.loadtxt(sed_path)
-        return data[:, 0], data[:, 1], f"file:{sed_path}"
+        wave, flux = data[:, 0], data[:, 1]
+        if sed_overlaps_filter(wave, filt):
+            return wave, flux, f"file:{sed_path}"
+        print(
+            f"[sed] file {sed_path} does not overlap {filt} "
+            f"([{np.nanmin(wave):.2f},{np.nanmax(wave):.2f}] um); using mock",
+            flush=True,
+        )
+        return _mock()
 
     if prefer_spectrum and MIRI_SPEC_CSV.is_file():
         spec_cat = pd.read_csv(MIRI_SPEC_CSV)
@@ -605,12 +654,18 @@ def load_miri_sed(row, sed_path=None, prefer_spectrum=True):
             try:
                 wave, flux = load_miri_spectrum_csv(_resolve_repo_path(csv_rel))
                 if len(wave) >= 5 and np.nanmax(flux) > 0:
-                    return wave, flux, f"miri_x1d:{csv_rel}"
+                    if sed_overlaps_filter(wave, filt):
+                        return wave, flux, f"miri_x1d:{csv_rel}"
+                    print(
+                        f"[sed] x1d {csv_rel} does not overlap {filt} "
+                        f"([{np.nanmin(wave):.2f},{np.nanmax(wave):.2f}] um); "
+                        f"using mock",
+                        flush=True,
+                    )
             except FileNotFoundError:
                 pass
 
-    wave, flux = mock_spectrum(float(row["z"]), wave_max_um=28.0)
-    return wave, flux, f"mock_spectrum:z={float(row['z']):.3f}"
+    return _mock()
 
 
 def errors_from_anchors(y, anchors, floor=0.008):
@@ -649,12 +704,20 @@ def mock_observed_profile(name, info, annulus_width=0.03, max_radius=0.4):
 # Loss + one MC draw (top-level for ProcessPoolExecutor pickling)
 # ---------------------------------------------------------------------------
 def profile_mse(params, wave, flux, r_obs, prof_obs, sim_kwargs):
+    global _SIM_ERR_LOGGED
     theta, n = params
     if not (0.001 < theta < 0.5 and 0.1 < n < 8):
         return 1e10
     try:
         _, sim, _ = simulate_profile(wave, flux, theta, n, radii_arcsec=r_obs, **sim_kwargs)
-    except Exception:
+    except Exception as exc:
+        # Log once per process; Nelder–Mead would otherwise spam every eval.
+        if not _SIM_ERR_LOGGED:
+            print(
+                f"[sim] {type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            _SIM_ERR_LOGGED = True
         return 1e10
     # Require fully finite profiles; partial NaNs make mean(...) → NaN.
     if (not np.all(np.isfinite(sim)) or np.nanmax(sim) <= 0
@@ -862,13 +925,21 @@ def fit_one_miri(name, n_mc, n_prior, n_workers, use_pandeia, sed_path=None,
         raise RuntimeError(f"{name}: radial profile too short ({len(r)} bins)")
 
     wave, flux, sed_label = load_miri_sed(
-        row, sed_path=sed_path, prefer_spectrum=prefer_spectrum,
+        row, sed_path=sed_path, prefer_spectrum=prefer_spectrum, filter_name=filt,
     )
     print(
         f"[sed] {name}: {sed_label}  filter={filt}  n_wave={len(wave)}  "
+        f"wave=[{np.nanmin(wave):.2f},{np.nanmax(wave):.2f}] um  "
         f"pix={meta['pix_scale']:.4f}\"/px  n_r={len(r)}",
         flush=True,
     )
+
+    if use_pandeia and not sed_overlaps_filter(wave, filt):
+        band = MIRI_FILTER_BANDPASS.get(filt, ("?", "?"))
+        raise RuntimeError(
+            f"{name}: SED [{np.nanmin(wave):.2f},{np.nanmax(wave):.2f}] um "
+            f"does not overlap {filt} bandpass [{band[0]},{band[1]}] um"
+        )
 
     # Theta init ~ MIRI PSF scale; physical re_pc only for reporting fallback.
     theta_init = max(PSF_FWHM.get(filt, 0.32) * 0.5, 0.05)
