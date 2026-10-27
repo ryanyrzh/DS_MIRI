@@ -1,0 +1,16 @@
+numpy
+scipy
+pandas
+matplotlib
+astropy
+astroquery
+bagpipes
+emcee
+tqdm
+pandeia.engine==2026.2
+
+# # Used in original_notebooks/ only
+# scikit-learn
+# seaborn
+# joblib
+# synphot
